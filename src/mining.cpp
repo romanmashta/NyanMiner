@@ -6,6 +6,7 @@
 #include <nvs.h>
 //#include "ShaTests/nerdSHA256.h"
 #include "ShaTests/nerdSHA256plus.h"
+#include "mining_core.h"
 #include "stratum.h"
 #include "mining.h"
 #include "utils.h"
@@ -133,20 +134,11 @@ void runStratumWorker(void *name) {
       continue;
     } 
 
-    //Test vars:
-    //************
-    //Nerdminerpool
-    // strcpy(poolString, "nerdminerPool"); 
-    // portNumber = 3002;
-    // strcpy(btcString,"test");
-    //Braiins
-    //strcpy(poolString, "eu.stratum.braiins.com");
-    //portNumber = 3333;
-    //strcpy(btcString,"Bitmaker.01");
-    //CKpool
-    //strcpy(poolString, "solo.ckpool.org");
-    //portNumber = 3333;
-    //strcpy(btcString,"test");
+    #ifdef TEST_POOL
+    strcpy(poolString, TEST_POOL_HOST);
+    portNumber = TEST_POOL_PORT;
+    strcpy(btcString, "e2e_test_worker");
+    #endif
 
     if(!checkPoolConnection())
       //If server is not reachable add random delay for connection retries
@@ -256,74 +248,57 @@ void runMiner(void * task_id) {
     mMonitor.NerdStatus = NM_hashing;
 
     //Prepare Premining data
-    //nerd_sha256 nerdMidstate;
-    nerdSHA256_context nerdMidstate; //NerdShaplus
+    nerdSHA256_context nerdMidstate;
     uint8_t hash[32];
-    
 
-    //Calcular midstate
-    //nerd_midstate(&nerdMidstate, mMiner.bytearray_blockheader, 64);
-    nerd_mids(&nerdMidstate, mMiner.bytearray_blockheader); //NerdShaplus
-
+    //Calculate midstate
+    nerd_mids(nerdMidstate.digest, mMiner.bytearray_blockheader);
 
     uint32_t startT = micros();
     unsigned char *header64;
     // each miner thread needs to track its own blockheader template
-    uint8_t temp;
 
     memcpy(mMiner.bytearray_blockheader2, &mMiner.bytearray_blockheader, 80);
     if (miner_id == 0)
       header64 = mMiner.bytearray_blockheader + 64;
     else
       header64 = mMiner.bytearray_blockheader2 + 64;
-    
-    bool is16BitShare=true;  
+
+    // Precompute nonce-independent work (bake optimization)
+    uint32_t bake[15];
+    nerd_sha256_bake(nerdMidstate.digest, header64, bake);
+
     Serial.println(">>> STARTING TO HASH NONCES");
     while(true) {
+      #ifdef TEST_POOL_NONCE
+      const unsigned long nonce = TEST_POOL_NONCE;
+      #else
       const unsigned long nonce = esp_random();
+      #endif
       if (miner_id == 0)
         memcpy(mMiner.bytearray_blockheader + 76, &nonce, 4);
       else
         memcpy(mMiner.bytearray_blockheader2 + 76, &nonce, 4);
 
-
-      // nerd_double_sha2(&nerdMidstate, header64, hash);
-      is16BitShare=nerd_sha256d(&nerdMidstate, header64, hash); //Boosted 80Khs sha
-
-      /*Serial.print("hash1: ");
-      for (size_t i = 0; i < 32; i++)
-            Serial.printf("%02x", hash[i]);
-        Serial.println("");  
-      Serial.print("hash2: ");
-      for (size_t i = 0; i < 32; i++)
-            Serial.printf("%02x", hash2[i]);
-        Serial.println("");  */
+      nonce_result result = check_nonce_fast(
+          nerdMidstate.digest, header64, bake,
+          mMiner.bytearray_target, mMiner.poolDifficulty, hash);
 
       hashes++;
       if(!mMiner.inRun) { Serial.println ("MINER WORK ABORTED >> waiting new job"); break;}
 
-      // check if 16bit share
-      if(hash[31] !=0 || hash[30] !=0) {
-      //if(!is16BitShare){
-        // increment nonce
+      if(!result.is_16bit_share) {
         continue;
       }
 
-      //Check target to submit
-      //Difficulty of 1 > 0x00000000FFFF0000000000000000000000000000000000000000000000000000
-      //NM2 pool diff 1e-9 > Target = diff_1 / diff_pool > 0x00003B9ACA00....00
-      //Swapping diff bytes little endian >>>>>>>>>>>>>>>> 0x0000DC59D300....00  
-      //if((hash[29] <= 0xDC) && (hash[28] <= 0x59))     //0x00003B9ACA00  > diff value for 1e-9
-      double diff_hash = diff_from_target(hash);
-
       // update best diff
-      if (diff_hash > best_diff)
-        best_diff = diff_hash;
+      if (result.difficulty > best_diff)
+        best_diff = result.difficulty;
 
-      if(diff_hash > mMiner.poolDifficulty)//(hash[29] <= 0x3B)//(diff_hash > 1e-9)
+      if(result.difficulty > mMiner.poolDifficulty)
       {
         tx_mining_submit(client, mWorker, mJob, nonce);
-        Serial.print("   - Current diff share: "); Serial.println(diff_hash,12);
+        Serial.print("   - Current diff share: "); Serial.println(result.difficulty,12);
         Serial.print("   - Current pool diff : "); Serial.println(mMiner.poolDifficulty,12);
         Serial.print("   - TX SHARE: ");
         for (size_t i = 0; i < 32; i++)
@@ -337,18 +312,17 @@ void runMiner(void * task_id) {
         }
         #endif
         Serial.println("");
-        mLastTXtoPool = millis();  
+        mLastTXtoPool = millis();
       }
-      
-      // check if 32bit share
-      if(hash[29] !=0 || hash[28] !=0) {
-        // increment nonce
+
+      #ifndef TEST_POOL
+      if(!result.is_32bit_share) {
         continue;
       }
+      #endif
       shares++;
 
-      // check if valid header
-      if(checkValid(hash, mMiner.bytearray_target)){
+      if(result.is_valid_block){
         Serial.printf("[WORKER] %d CONGRATULATIONS! Valid block found with nonce: %d | 0x%x\n", miner_id, nonce, nonce);
         valids++;
         Serial.printf("[WORKER]  %d  Submitted work valid!\n", miner_id);

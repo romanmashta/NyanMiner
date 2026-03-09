@@ -90,6 +90,7 @@ bool parse_mining_subscribe(String line, mining_subscribe& mSubscribe)
     if (error || checkError(doc)) return false;
     if (!doc.containsKey("result")) return false;
 
+    if (doc["result"][0][0][1].isNull() || doc["result"][1].isNull()) return false;
     mSubscribe.sub_details = String((const char*) doc["result"][0][0][1]);
     mSubscribe.extranonce1 = String((const char*) doc["result"][1]);
     mSubscribe.extranonce2_size = doc["result"][2];
