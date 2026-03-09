@@ -1,0 +1,10 @@
+{
+  "name": "nyanminer-e2e-stratum",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mock Stratum V1 pool for NyanMiner e2e testing",
+  "scripts": {
+    "start": "node mock_pool.js",
+    "test": "node mock_pool.js --timeout 60"
+  }
+}
